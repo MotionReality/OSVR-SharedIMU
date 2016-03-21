@@ -1,0 +1,50 @@
+{
+    "deviceVendor": "Motion Reality, Inc.",
+    "deviceName": "Remote OSVR HDK IMU",
+    "author": "Matt Dutton <matt.dutton@motionreality.com>",
+    "version": 1,
+    "lastModified": "2016-02-29T14:26:00+00:00",
+    "interfaces": {
+        "tracker": {
+            "count": 1,
+            "bounded": true,
+            "position": false,
+            "orientation": true,
+            "angularVelocity": true
+        },
+        "analog": {
+            "count": 2,
+            "traits": [{
+                "min": 0
+            }, {
+                "min": 0,
+                "max": 3
+            }]
+        }
+    },
+    "semantic": {
+        "hmd": {
+            "$target": {
+                "rotate": {
+                    "axis": "x",
+                    "degrees": 90
+                },
+                "child": {
+                    "changeBasis": {
+                        "x": "-x",
+                        "y": "-z",
+                        "z": "y"
+                    },
+                    "child": "tracker/0"
+                }
+            }
+        },
+        "status": {
+            "reportVersion": "analog/0",
+            "videoStatus": "analog/1"
+        }
+    },
+    "automaticAliases": {
+        "/me/head": "semantic/hmd"
+    }
+}
