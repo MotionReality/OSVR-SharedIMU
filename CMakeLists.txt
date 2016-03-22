@@ -1,13 +1,16 @@
 cmake_minimum_required(VERSION 2.8.12)
 project(OSVR_NetPlugin) # Change this line.
 
+list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
+
 # This looks for an osvrConfig.cmake file - most of the time it can be
 # autodetected but you might need to create/extend CMAKE_PREFIX_PATH to include something like
 # C:/Users/Ryan/Desktop/build/OSVR-Core-vc12 or
 # C:/Users/Ryan/Downloads/OSVR-Core-Snapshot-v0.1-406-gaa55515-build54-vs12-32bit
 # in the CMake GUI or command line.
 find_package(osvr REQUIRED)
-
+find_package(Eigen3 REQUIRED)
+include_directories("${EIGEN3_INCLUDE_DIR}")
 
 # This generates a header file, from the named json file, containing a string literal
 # named com_osvr_example_selfcontained_json (not null terminated)
