@@ -19,7 +19,7 @@
 #include <atomic>
 #include <mutex>
 
-#pragma optimize("",off)
+//#pragma optimize("",off)
 #pragma comment(lib,"Ws2_32.lib")
 
 // Anonymous namespace to avoid symbol collision
@@ -83,7 +83,7 @@ namespace {
 
             for ( auto const & msgBuf : m_processQueue )
             {
-                uint16_t const * const pShorts = reinterpret_cast<uint16_t const *>(&msgBuf.data[2]);
+                int16_t const * const pShorts = reinterpret_cast<int16_t const *>(&msgBuf.data[2]);
 
                 unsigned int const ver = msgBuf.data[0] & 0x0F;
 
@@ -186,7 +186,7 @@ namespace {
 
         void ThreadEntry()
         {
-            while (!m_shutdown)
+            while (!m_shutdown && m_socket != INVALID_SOCKET)
             {
                 AcceptIncomingConnections();
 
@@ -374,7 +374,7 @@ namespace {
                 }
                 else
                 {
-                    int const err = ::GetLastError();
+                    int const err = ::WSAGetLastError();
                     if (err == WSAEWOULDBLOCK)
                         break;
                     
