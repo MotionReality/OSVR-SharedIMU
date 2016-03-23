@@ -15,6 +15,9 @@
 #include <Windows.h>
 
 #include <hidapi.h>
+#include <thread>
+#include <atomic>
+#include <mutex>
 
 #pragma optimize("",off)
 #pragma comment(lib,"Ws2_32.lib")
@@ -26,9 +29,10 @@ namespace {
     {
     public:
         OSVR_NetPlugin(OSVR_PluginRegContext ctx)
-            : m_socket(INVALID_SOCKET)
+            : m_lastStatus(EnStatus_CLOSED)
+            , m_timeoutCount(0)
+            , m_socket(INVALID_SOCKET)
             , m_pHidDevice(nullptr)
-            , m_lastOpenAttempt()
             , m_updateCounter(0)
         {
             OpenSocket();            
@@ -44,55 +48,108 @@ namespace {
             osvrDeviceAnalogConfigure(opts, &m_analog, 2);
 
             /// Create the device token with the options
-            m_devToken.initAsync(ctx, "OSVR_NetPlugin", opts);
+            m_devToken.initSync(ctx, "OSVR_NetPlugin", opts);
 
             /// Send JSON descriptor
             m_devToken.sendJsonDescriptor(com_motionreality_OSVR_NetPlugin_json);
 
             /// Register update callback
             m_devToken.registerUpdateCallback(this);
+            std::cerr << "ctor" << std::endl;
+
+            m_recvQueue.reserve(100);
+            m_processQueue.reserve(100);
+
+            m_shutdown = false;
+            m_thread = std::move(std::thread(&OSVR_NetPlugin::ThreadEntry, this));
         }
 
         ~OSVR_NetPlugin()
         {
-            CloseDevice();
+            std::cerr << "dtor" << std::endl;
+            m_shutdown = true;
             CloseSocket();
+            if (m_thread.joinable())
+                m_thread.join();
+            CloseDevice();            
         }
 
         OSVR_ReturnCode update()
         {
-            if (m_socket == INVALID_SOCKET)
             {
-                osvrDeviceMicrosleep(50000);
-                return OSVR_RETURN_FAILURE;
+                std::lock_guard<std::mutex> lockGuard(m_dataMutex);
+                m_processQueue.swap(m_recvQueue);
             }
 
-            if (!m_pHidDevice)
+            for ( auto const & msgBuf : m_processQueue )
             {
-                OSVR_TimeValue now;
-                osvrTimeValueGetNow(&now);
-                auto const ageSeconds = osvrTimeValueDurationSeconds(&now, &m_lastOpenAttempt);
-                if (ageSeconds > 1)
+                uint16_t const * const pShorts = reinterpret_cast<uint16_t const *>(&msgBuf.data[2]);
+
+                unsigned int const ver = msgBuf.data[0] & 0x0F;
+
+                double fValues[7];
+                double const SCALE = 1.f / (1 << 14);
+                for (size_t i = 0; i < 7; ++i)
                 {
-                    m_lastOpenAttempt = now;
-                    if (!OpenDevice())
-                    {
-                        std::cerr << "<NetPlugin> Failed to open device" << std::endl;
-                        return OSVR_RETURN_SUCCESS; // We want more callbacks (in case this return is ever used)
+                    fValues[i] = pShorts[i] * SCALE;
+                }
+
+                OSVR_OrientationState q;
+                osvrQuatSetX(&q, fValues[0]);
+                osvrQuatSetY(&q, fValues[1]);
+                osvrQuatSetZ(&q, fValues[2]);
+                osvrQuatSetW(&q, fValues[3]);
+                osvrDeviceTrackerSendOrientationTimestamped(m_devToken, m_tracker, &q, 0, &msgBuf.timestamp);
+
+                if (ver >= 2)
+                {
+                    auto const dt = 1. / 400.;
+                    auto const rotVec = Eigen::Map<Eigen::Vector3d>(&fValues[4]);
+                    auto const magnitude = rotVec.norm(); // radians per second
+                    auto const rotAxis = rotVec / magnitude;
+                    auto const deltaAngle = magnitude * dt; // radians per dt
+                    auto const qDelta = Eigen::Quaterniond(Eigen::AngleAxisd(deltaAngle, rotAxis));
+                    auto const qBase = Eigen::Map<Eigen::Quaterniond>(&fValues[0]);
+                    auto const qIncRot = (qBase * qDelta * qBase.inverse()).normalized();
+
+                    OSVR_AngularVelocityState dq;
+                    dq.dt = dt;
+                    osvrQuatSetX(&dq.incrementalRotation, qIncRot.x());
+                    osvrQuatSetY(&dq.incrementalRotation, qIncRot.y());
+                    osvrQuatSetZ(&dq.incrementalRotation, qIncRot.z());
+                    osvrQuatSetW(&dq.incrementalRotation, qIncRot.w());
+                    osvrDeviceTrackerSendAngularVelocityTimestamped(m_devToken, m_tracker, &dq, 0, &msgBuf.timestamp);
+                }
+
+                enum {
+                    VideoStatus_UNKNOWN = 0,
+                    VideoStatus_NO_VIDEO_INPUT = 1,
+                    VideoStatus_PORTRAIT_VIDEO_INPUT = 2,
+                    VideoStatus_LANDSCAPE_VIDEO_INPUT = 3,
+                };
+                int videoStatus = VideoStatus_UNKNOWN;
+                if (ver >= 3)
+                {
+                    // v3+: We've got status info in the upper nibble of the first byte.
+                    bool gotVideo = (msgBuf.data[0] & 0x10) != 0;    // got video?
+                    bool gotPortrait = (msgBuf.data[0] & 0x20) != 0; // portrait mode?
+                    if (!gotVideo) {
+                        videoStatus = VideoStatus_NO_VIDEO_INPUT;
+                    }
+                    else {
+                        if (gotPortrait) {
+                            videoStatus = VideoStatus_PORTRAIT_VIDEO_INPUT;
+                        }
+                        else {
+                            videoStatus = VideoStatus_LANDSCAPE_VIDEO_INPUT;
+                        }
                     }
                 }
-                else
-                {
-                    osvrDeviceMicrosleep(50000);
-                    return  OSVR_RETURN_SUCCESS; // We want more callbacks (in case this return is ever used)
-                }
+
+                /// Report the value of channel 0
+                osvrDeviceAnalogSetValueTimestamped(m_devToken, m_analog, ver, 0, &msgBuf.timestamp);
+                osvrDeviceAnalogSetValueTimestamped(m_devToken, m_analog, videoStatus, 1, &msgBuf.timestamp);
             }
-
-            ++m_updateCounter;
-
-            ProcessMessages();
-            AcceptIncomingConnections();
-
             return OSVR_RETURN_SUCCESS;
         }
 
@@ -101,13 +158,66 @@ namespace {
         OSVR_TrackerDeviceInterface m_tracker;
         OSVR_AnalogDeviceInterface m_analog;
 
-        SOCKET m_socket;
-        hid_device * m_pHidDevice;
-        OSVR_TimeValue m_lastOpenAttempt;
+        std::atomic<bool> m_shutdown;
+        std::thread m_thread;
+        std::mutex m_dataMutex;
+        struct MsgBuffer
+        {
+            OSVR_TimeValue timestamp;
+            uint8_t data[16];
+        };
+        std::vector<MsgBuffer> m_recvQueue;
+        std::vector<MsgBuffer> m_processQueue;
+
+        enum EnStatus
+        {
+            EnStatus_CLOSED,
+            EnStatus_FAILED,
+            EnStatus_OPENED,
+        } m_lastStatus;
+        size_t m_timeoutCount;
         size_t m_updateCounter;
+
+        SOCKET m_socket;
+        hid_device * m_pHidDevice;        
         SOCKADDR_IN m_remoteAddr;
 
         unsigned short m_sLastValues[4];
+
+        void ThreadEntry()
+        {
+            while (!m_shutdown)
+            {
+                AcceptIncomingConnections();
+
+                if(!m_pHidDevice)
+                {
+                    if(OpenDevice())
+                    {
+                        m_lastStatus = EnStatus_OPENED;
+                    }
+                    else
+                    {
+                        if (EnStatus_FAILED != m_lastStatus)
+                        {
+                            m_lastStatus = EnStatus_FAILED;
+                            std::cerr << "<NetPlugin> Failed to open device" << std::endl;
+                        }
+                        // Sleep for 1 second and try again
+                        for (size_t i = 0; i < 100 && !m_shutdown; ++i)
+                        {
+                            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                        }
+                        continue;
+                    }
+                }
+
+                ++m_updateCounter;
+
+                ProcessMessages();
+            }
+            CloseDevice();
+        }
 
         void OpenSocket()
         {
@@ -229,6 +339,7 @@ namespace {
                 return false;
             }
 
+            m_timeoutCount = 0;
             return true;
         }
 
@@ -243,8 +354,12 @@ namespace {
 
         void AcceptIncomingConnections()
         {
-            if (m_updateCounter % 100) // Only check socket once every ~200ms
-                return;
+            // Don't check the socket every update. It's just wasteful
+            if (m_lastStatus == EnStatus_OPENED)
+            {
+                if ((m_updateCounter % 100) == 0 || m_timeoutCount > 0)
+                    return;
+            }
 
             char buffer[128];
             SOCKADDR_IN fromAddr = { 0 };
@@ -278,37 +393,48 @@ namespace {
             if (m_socket == INVALID_SOCKET || !m_pHidDevice)
                 return;
 
-
-            unsigned char buf[64];
+            MsgBuffer msgBuf;
             int timeout_millis = 100; // Initial timeout is high to detect drop out
-            while (true)
+            while (!m_shutdown)
             {
-                int nBytesRead = hid_read_timeout(m_pHidDevice, buf, sizeof(buf), timeout_millis);
+                int nBytesRead = hid_read_timeout(m_pHidDevice, msgBuf.data, sizeof(msgBuf.data), timeout_millis);
                 if (nBytesRead < 0)
                 {
                     std::cerr << "<NetPlugin> Error reading HID device" << std::endl;
+                    m_lastStatus = EnStatus_FAILED;
+                    hid_close(m_pHidDevice);
+                    m_pHidDevice = nullptr;
+                    std::this_thread::sleep_for(std::chrono::milliseconds(100));
                     return;
                 }
 
                 if (nBytesRead == 0)
                 {
-                    std::cerr << "<NetPlugin> Timeout reading HID device" << std::endl;
+                    if (timeout_millis > 0)
+                    {
+                        if (m_timeoutCount == 0)
+                        {
+                            std::cerr << "<NetPlugin> Timeout reading HID device" << std::endl;
+                        }
+                        ++m_timeoutCount;
+                    }
                     return;
                 }
 
                 // Once we've received a message this update, we just want to check
                 // quickly if there are any other messages pending
                 timeout_millis = 0;
+                m_timeoutCount = 0;
 
-                if (nBytesRead < sizeof(short) * 8)
+                if (nBytesRead < sizeof(msgBuf.data))
                 {
                     std::cerr << "<NetPlugin> Runt message @ len = " << nBytesRead << std::endl;
                     continue;
                 }
 
-                unsigned int ver = (buf[0] & 0x0F);
-                unsigned int seq = buf[1];
-                auto const * pShorts = (signed __int16 const *)&buf[2];
+                unsigned int ver = (msgBuf.data[0] & 0x0F);
+                unsigned int seq = msgBuf.data[1];
+                auto const * pShorts = (signed __int16 const *)&msgBuf.data[2];
 
                 bool const bChanged = (pShorts[0] != m_sLastValues[0]) ||
                                       (pShorts[1] != m_sLastValues[1]) ||
@@ -317,82 +443,24 @@ namespace {
                 if (!bChanged)
                     continue;
 
+                osvrTimeValueGetNow(&msgBuf.timestamp);
+
                 // Immediately send along to game
                 // Hopefully this is fast enough that we still get quality timestamps in the game
                 if (m_socket != INVALID_SOCKET && m_remoteAddr.sin_port != 0)
                 {
-                    ::sendto(m_socket, (char*)&buf[0], nBytesRead, 0, (SOCKADDR*)&m_remoteAddr, sizeof(m_remoteAddr));
+                    ::sendto(m_socket, (char*)&msgBuf.data[0], nBytesRead, 0, (SOCKADDR*)&m_remoteAddr, sizeof(m_remoteAddr));
                 }
 
                 for (size_t i = 0; i < 4; ++i)
                     m_sLastValues[i] = pShorts[i];
-                
-                double fValues[7];
-                double const SCALE = 1.f / (1 << 14);
-                for (size_t i = 0; i < 7; ++i)
+
+                // Enqueue
                 {
-                    fValues[i] = pShorts[i] * SCALE;
+                    std::lock_guard<std::mutex> lockGuard(m_dataMutex);
+                    m_recvQueue.emplace_back(msgBuf);
                 }
-
-                OSVR_TimeValue tvNow;
-                osvrTimeValueGetNow(&tvNow);
-
-                OSVR_OrientationState q;
-                osvrQuatSetX(&q, fValues[0]);
-                osvrQuatSetY(&q, fValues[1]);
-                osvrQuatSetZ(&q, fValues[2]);
-                osvrQuatSetW(&q, fValues[3]);
-                osvrDeviceTrackerSendOrientationTimestamped(m_devToken, m_tracker, &q, 0, &tvNow);
-
-                if (ver >= 2)
-                {
-                    auto const dt = 1. / 400.;
-                    auto const rotVec = Eigen::Map<Eigen::Vector3d>(&fValues[4]);
-                    auto const magnitude = rotVec.norm(); // radians per second
-                    auto const rotAxis = rotVec / magnitude;
-                    auto const deltaAngle = magnitude * dt; // radians per dt
-                    auto const qDelta = Eigen::Quaterniond(Eigen::AngleAxisd(deltaAngle, rotAxis));
-                    auto const qBase = Eigen::Map<Eigen::Quaterniond>(&fValues[0]);
-                    auto const qIncRot = (qBase * qDelta * qBase.inverse()).normalized();
-
-                    OSVR_AngularVelocityState dq;
-                    dq.dt = dt;
-                    osvrQuatSetX(&dq.incrementalRotation, qIncRot.x());
-                    osvrQuatSetY(&dq.incrementalRotation, qIncRot.y());
-                    osvrQuatSetZ(&dq.incrementalRotation, qIncRot.z());
-                    osvrQuatSetW(&dq.incrementalRotation, qIncRot.w());
-                    osvrDeviceTrackerSendAngularVelocityTimestamped(m_devToken, m_tracker, &dq, 0, &tvNow);
-                }
-
-                enum {
-                    VideoStatus_UNKNOWN = 0,
-                    VideoStatus_NO_VIDEO_INPUT = 1,
-                    VideoStatus_PORTRAIT_VIDEO_INPUT = 2,
-                    VideoStatus_LANDSCAPE_VIDEO_INPUT = 3,
-                };
-                int videoStatus = VideoStatus_UNKNOWN;
-                if (ver >= 3)
-                {
-                    // v3+: We've got status info in the upper nibble of the first byte.
-                    bool gotVideo = (buf[0] & 0x10) != 0;    // got video?
-                    bool gotPortrait = (buf[0] & 0x20) != 0; // portrait mode?
-                    if (!gotVideo) {
-                        videoStatus = VideoStatus_NO_VIDEO_INPUT;
-                    }
-                    else {
-                        if (gotPortrait) {
-                            videoStatus = VideoStatus_PORTRAIT_VIDEO_INPUT;
-                        }
-                        else {
-                            videoStatus = VideoStatus_LANDSCAPE_VIDEO_INPUT;
-                        }
-                    }
-                }
-
-                /// Report the value of channel 0
-                osvrDeviceAnalogSetValueTimestamped(m_devToken, m_analog, ver, 0, &tvNow);
-                osvrDeviceAnalogSetValueTimestamped(m_devToken, m_analog, videoStatus, 1, &tvNow);
-            }
+             }
         }
     };
 
@@ -404,7 +472,12 @@ OSVR_PLUGIN(com_motionreality_OSVR_NetPlugin) {
     std::cerr << "Loading plugin: com_motionreality_OSVR_NetPlugin" << std::endl;
 
     /// Create our device object
-    osvr::pluginkit::registerObjectForDeletion(ctx, new OSVR_NetPlugin(ctx));
+    static bool bOnce = false;
+    if (!bOnce)
+    {
+        osvr::pluginkit::registerObjectForDeletion(ctx, new OSVR_NetPlugin(ctx));
+        bOnce = true;
+    }
     
     return OSVR_RETURN_SUCCESS;
 }
