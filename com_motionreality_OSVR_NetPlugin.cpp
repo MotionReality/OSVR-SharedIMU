@@ -116,6 +116,8 @@ namespace {
             for (size_t i = 0; i < sizeof(s_devices) / sizeof(VenDev); ++i)
             {
                 auto const & id = s_devices[i];
+                // @note We are relying on the modified version of HIDAPI checked in with this
+                //      plug-in that always opens the device in shared mode.
                 m_pHidDevice = hid_open(id.vendor, id.device, NULL);
                 if (m_pHidDevice)
                 {
