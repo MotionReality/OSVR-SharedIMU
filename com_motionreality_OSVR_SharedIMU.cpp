@@ -43,6 +43,8 @@ namespace {
 
             /// Register update callback
             m_devToken.registerUpdateCallback(this);
+
+            memset(&m_lastDeviceTime, 0, sizeof(m_lastDeviceTime));
         }
 
         ~OSVR_SharedIMU()
