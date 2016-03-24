@@ -1,0 +1,41 @@
+{
+    /*
+    This configuration supports the MRI plug-in for sharing an OSVR HDK IMU
+    and the OSVR provided dead-reckoning of the IMU.
+    */
+    "display": "displays/OSVR_HDK_1_1.json",
+    "renderManagerConfig": "sample-configs/renderManager.direct.portrait.json",
+    "drivers": [
+        {
+            "plugin": "org_osvr_filter_deadreckoningrotation",
+            "driver": "DeadReckoningRotationTracker",
+            "params": {
+                "name": "FilteredHead",
+                "input": "com_motionreality_OSVR_SharedIMU/OSVR_SharedIMU",
+                "numSensors": 1,
+                "predictMilliSeconds": 20 /* Tweak this */
+            }
+        }
+    ],
+    "aliases": {
+        "/headspace": {
+            /* This alias is needed because the Dead Reckoning rotation plugin device description
+               accesses the raw IMU data and ignores the OSVR-SharedIMU device descriptor. This
+               means that the output format matches the input format and isn't corrected by a
+               built-in descriptor. We add this alias here to correct for that. */
+            "rotate": {
+                    "axis": "x",
+                    "degrees": 90
+                },
+                "child": {
+                    "changeBasis": {
+                        "x": "-x",
+                        "y": "-z",
+                        "z": "y"
+                    },
+                    "child": "/org_osvr_filter_deadreckoningrotation/FilteredHead/tracker/0"
+                }
+        },
+        "/me/head": "/headspace"
+    }
+}

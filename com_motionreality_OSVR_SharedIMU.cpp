@@ -6,29 +6,21 @@
 #include <Eigen/Geometry>
 
 // Generated JSON header file
-#include "com_motionreality_OSVR_NetPlugin_json.h"
+#include "com_motionreality_OSVR_SharedIMU_json.h"
 
 #include <iostream>
 
-#include <WinSock2.h>
-#include <ws2tcpip.h>
-#include <Windows.h>
-
 #include <hidapi.h>
-#include <thread>
-#include <atomic>
-#include <mutex>
 
 //#pragma optimize("",off)
-#pragma comment(lib,"Ws2_32.lib")
 
 // Anonymous namespace to avoid symbol collision
 namespace {
 
-    class OSVR_NetPlugin
+    class OSVR_SharedIMU
     {
     public:
-        OSVR_NetPlugin(OSVR_PluginRegContext ctx)
+        OSVR_SharedIMU(OSVR_PluginRegContext ctx)
             : m_lastStatus(EnStatus_CLOSED)
             , m_timeoutCount(0)
             , m_pHidDevice(nullptr)
@@ -44,19 +36,17 @@ namespace {
             osvrDeviceAnalogConfigure(opts, &m_analog, 2);
 
             /// Create the device token with the options
-            m_devToken.initSync(ctx, "OSVR_NetPlugin", opts);
+            m_devToken.initSync(ctx, "OSVR_SharedIMU", opts);
 
             /// Send JSON descriptor
-            m_devToken.sendJsonDescriptor(com_motionreality_OSVR_NetPlugin_json);
+            m_devToken.sendJsonDescriptor(com_motionreality_OSVR_SharedIMU);
 
             /// Register update callback
             m_devToken.registerUpdateCallback(this);
-            std::cerr << "ctor" << std::endl;
         }
 
-        ~OSVR_NetPlugin()
+        ~OSVR_SharedIMU()
         {
-            std::cerr << "dtor" << std::endl;
             CloseDevice();
             hid_exit();
         }
@@ -98,6 +88,8 @@ namespace {
                 return false;
             }
 
+            std::cerr << "<SharedIMU> Attempting to open HID" << std::endl;
+
             m_lastDeviceTime = tvNow;
             memset(&m_sLastValues[0], 0, sizeof(m_sLastValues));
 
@@ -122,7 +114,7 @@ namespace {
                 if (m_pHidDevice)
                 {
                     char buffer[128];
-                    sprintf(buffer, "<NetPlugin> Opened OSVR HDK IMU device (VID%04X/PID%04X)", id.vendor, id.device);
+                    sprintf_s(buffer, "<SharedIMU> Opened OSVR HDK IMU device (VID%04X/PID%04X)", id.vendor, id.device);
                     std::cerr << buffer << std::endl;
                     break;
                 }
@@ -143,7 +135,7 @@ namespace {
 
             if (ret < 0) // Error while purging data
             {
-                std::cerr << "Error reading HID device: " << ret << std::endl;
+                std::cerr << "<SharedIMU> Error reading HID device: " << ret << std::endl;
                 CloseDevice();
                 return false;
             }
@@ -181,10 +173,10 @@ namespace {
             
             for (size_t i = 0; i < 10; ++i)
             {
-                int nBytesRead = hid_read_timeout(m_pHidDevice, msgBuf.data, sizeof(msgBuf.data), timeout_millis);
+                int nBytesRead = hid_read_timeout(m_pHidDevice, &msgBuf.data[0], sizeof(msgBuf.data), timeout_millis);
                 if (nBytesRead < 0)
                 {
-                    std::cerr << "<NetPlugin> Error reading HID device" << std::endl;
+                    std::cerr << "<SharedIMU> Error reading HID device" << std::endl;
                     m_lastStatus = EnStatus_FAILED;
                     CloseDevice();
                     return;
@@ -196,7 +188,7 @@ namespace {
                     {
                         if (m_timeoutCount == 0)
                         {
-                            std::cerr << "<NetPlugin> Timeout reading HID device" << std::endl;
+                            std::cerr << "<SharedIMU> Timeout reading HID device" << std::endl;
                         }
                         ++m_timeoutCount;
                     }
@@ -210,7 +202,7 @@ namespace {
 
                 if (nBytesRead < sizeof(msgBuf.data))
                 {
-                    std::cerr << "<NetPlugin> Runt message @ len = " << nBytesRead << std::endl;
+                    std::cerr << "<SharedIMU> Runt message @ len = " << nBytesRead << std::endl;
                     return;
                 }
 
@@ -299,16 +291,16 @@ namespace {
 
 } // namespace
 
-OSVR_PLUGIN(com_motionreality_OSVR_NetPlugin) {
+OSVR_PLUGIN(com_motionreality_OSVR_SharedIMU) {
     osvr::pluginkit::PluginContext context(ctx);
 
-    std::cerr << "Loading plugin: com_motionreality_OSVR_NetPlugin" << std::endl;
+    std::cerr << "Loading plugin: com_motionreality_OSVR_SharedIMU" << std::endl;
 
     /// Create our device object
     static bool bOnce = false;
     if (!bOnce)
     {
-        osvr::pluginkit::registerObjectForDeletion(ctx, new OSVR_NetPlugin(ctx));
+        osvr::pluginkit::registerObjectForDeletion(ctx, new OSVR_SharedIMU(ctx));
         bOnce = true;
     }
 
