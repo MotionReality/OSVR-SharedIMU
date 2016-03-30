@@ -240,7 +240,7 @@ namespace {
 
                 if (ver >= 2)
                 {
-                    auto const dt = 1. / 400.;
+                    auto const dt = 1. / 50.;
                     auto const rotVec = Eigen::Map<Eigen::Vector3d>(&fValues[4]);
                     auto const magnitude = rotVec.norm(); // radians per second
                     auto const rotAxis = rotVec / magnitude;
