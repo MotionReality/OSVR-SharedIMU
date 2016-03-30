@@ -243,7 +243,7 @@ namespace {
                     auto const dt = 1. / 50.;
                     auto const rotVec = Eigen::Map<Eigen::Vector3d>(&fValues[4]);
                     auto const magnitude = rotVec.norm(); // radians per second
-                    auto const rotAxis = rotVec / magnitude;
+                    auto const rotAxis = (magnitude > 0.0001) ? rotVec / magnitude : Eigen::Vector3d(1, 0, 0);
                     auto const deltaAngle = magnitude * dt; // radians per dt
                     auto const qDelta = Eigen::Quaterniond(Eigen::AngleAxisd(deltaAngle, rotAxis));
                     auto const qBase = Eigen::Map<Eigen::Quaterniond>(&fValues[0]);
